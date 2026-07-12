@@ -1,17 +1,11 @@
 import { useState } from 'react';
 import JSZip from 'jszip';
-import { ConvertedFile } from '@/hooks/useFileConverter';
+import type { ConvertedFile } from '@/hooks/useFileConverter';
 
 interface Props {
   results: ConvertedFile[];
   onReset: () => void;
 }
-
-const AUDIO_FMTS = new Set(['MP3', 'WAV', 'AAC', 'FLAC', 'OGG']);
-const VIDEO_FMTS = new Set(['MP4', 'WEBM', 'MOV', 'AVI', 'MKV']);
-
-function isAudioFile(fmt: string) { return AUDIO_FMTS.has(fmt.toUpperCase()); }
-function isVideoFile(fmt: string) { return VIDEO_FMTS.has(fmt.toUpperCase()); }
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -47,11 +41,16 @@ function Lightbox({ file, onClose, onPrev, onNext, hasPrev, hasNext }: LightboxP
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm"
       onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Preview ${file.name}`}
     >
       {/* Nav: prev */}
       {hasPrev && (
         <button
           onClick={(e) => { e.stopPropagation(); onPrev(); }}
+          type="button"
+          aria-label="Previous image"
           className="absolute left-4 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition cursor-pointer z-10 whitespace-nowrap"
         >
           <i className="ri-arrow-left-s-line text-xl"></i>
@@ -92,6 +91,8 @@ function Lightbox({ file, onClose, onPrev, onNext, hasPrev, hasNext }: LightboxP
       {hasNext && (
         <button
           onClick={(e) => { e.stopPropagation(); onNext(); }}
+          type="button"
+          aria-label="Next image"
           className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition cursor-pointer z-10 whitespace-nowrap"
         >
           <i className="ri-arrow-right-s-line text-xl"></i>
@@ -101,6 +102,8 @@ function Lightbox({ file, onClose, onPrev, onNext, hasPrev, hasNext }: LightboxP
       {/* Close */}
       <button
         onClick={onClose}
+        type="button"
+        aria-label="Close image preview"
         className="absolute top-4 right-4 w-9 h-9 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition cursor-pointer whitespace-nowrap"
       >
         <i className="ri-close-line text-lg"></i>
@@ -276,7 +279,7 @@ export default function DownloadLinks({ results, onReset }: Props) {
 
   if (results.length === 0) return null;
 
-  const imageResults = results.filter((r) => !isAudioFile(r.format) && !isVideoFile(r.format));
+  const imageResults = results.filter((result) => result.fileType === 'image');
 
   const handleDownloadAll = async () => {
     if (zipping) return;
@@ -372,10 +375,10 @@ export default function DownloadLinks({ results, onReset }: Props) {
         {/* Cards grid */}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {results.map((r) => {
-            // Use fileType first (most reliable), fall back to format string matching
-            if (r.fileType === 'video' || isVideoFile(r.format)) return <VideoCard key={r.name} file={r} />;
-            if (r.fileType === 'audio' || isAudioFile(r.format)) return <AudioCard key={r.name} file={r} />;
-            return <ImageCard key={r.name} file={r} onPreview={() => openLightbox(r)} />;
+            const key = `${r.originalName}::${r.formatId}`;
+            if (r.fileType === 'video') return <VideoCard key={key} file={r} />;
+            if (r.fileType === 'audio') return <AudioCard key={key} file={r} />;
+            return <ImageCard key={key} file={r} onPreview={() => openLightbox(r)} />;
           })}
         </div>
 

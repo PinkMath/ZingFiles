@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { TrimSettings } from '@/hooks/useFileConverter';
+import type { TrimSettings } from '@/hooks/useFileConverter';
 
 // ─── CSS injected once for range thumb styling ────────────────────────────────
 const RANGE_STYLE = `
@@ -82,6 +82,7 @@ function DualRangeSlider({ duration, start, end, onStartChange, onEndChange, onS
       {/* Start thumb input — CSS handles the visible thumb dot */}
       <input
         type="range" min={0} max={duration} step={0.05}
+        aria-label="Video trim start"
         value={start}
         disabled={disabled}
         onChange={(e) => {
@@ -97,6 +98,7 @@ function DualRangeSlider({ duration, start, end, onStartChange, onEndChange, onS
       {/* End thumb input — CSS handles the visible thumb dot */}
       <input
         type="range" min={0} max={duration} step={0.05}
+        aria-label="Video trim end"
         value={end}
         disabled={disabled}
         onChange={(e) => {
@@ -248,6 +250,7 @@ function VideoTrimCard({ file, trim, onTrimChange, disabled }: TrimCardProps) {
               <p className="text-[10px] text-white/30 uppercase tracking-wider mb-0.5">Start</p>
               <input
                 type="number"
+                aria-label={`Start time for ${file.name}`}
                 min={0}
                 max={effectiveEnd - 0.1}
                 step={0.1}
@@ -284,6 +287,7 @@ function VideoTrimCard({ file, trim, onTrimChange, disabled }: TrimCardProps) {
               <p className="text-[10px] text-white/30 uppercase tracking-wider mb-0.5 text-right">End</p>
               <input
                 type="number"
+                aria-label={`End time for ${file.name}`}
                 min={effectiveStart + 0.1}
                 max={duration}
                 step={0.1}

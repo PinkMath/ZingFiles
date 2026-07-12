@@ -1,111 +1,133 @@
-# 🔄 FileConvert — Browser-Native Media Converter
+# ZingFiles
 
-> Convert images, audio, and video files instantly — right in your browser. No uploads, no servers, no limits.
+ZingFiles is a privacy-first media converter that runs in the browser. It converts only formats that the current browser can genuinely encode, validates each output, and never treats changing a filename extension as a successful conversion.
 
-# Try the site [aqui](https://loavy.github.io/ZingFiles/)
+[Open ZingFiles](https://loavy.github.io/ZingFiles/)
 
----
+## What ZingFiles does
 
-## ✨ Features
+- Converts supported images and audio files entirely on the local device.
+- Converts or trims video when the browser exposes a compatible encoder.
+- Supports selecting multiple output formats where those formats are available.
+- Provides previews, individual downloads, and a Download All ZIP archive.
+- Rejects unavailable conversions instead of silently substituting another format.
 
-- **Image conversion** — JPG, PNG, WEBP, GIF, BMP (select multiple output formats at once)
-    - **Audio conversion** — WAV, MP3, AAC, FLAC, OGG
-    - **Video conversion** — WEBM, MP4, or extract the audio track only
-    - **Multi-format output** — pick several formats at once and get a separate file for each
-    - **Video trimmer** — set precise start/end timestamps before converting
-    - **Drag & drop** upload with file reordering
-    - **Lightbox preview** for converted images
-    - **In-browser audio player** for converted audio files
-    - **Download All as ZIP** — pack every output into a single zip file
-    - **Zero uploads** — everything runs locally via Canvas, Web Audio API, and MediaRecorder
-    - **Mobile-friendly** — fully responsive layout
+User files are read and processed locally with browser APIs and are not uploaded to ZingFiles or an external file-processing service.
 
-    ---
+## Output format support
 
-## 🚀 Getting Started
+Support below describes output encoding. Whether an input file can be opened also depends on the browser's installed decoders.
 
-### Prerequisites
+| Format | Category | Availability | Conversion method and limitations |
+| --- | --- | --- | --- |
+| JPG/JPEG | Image | Enabled | Canvas JPEG encoder. Transparency is flattened onto a solid background. |
+| PNG | Image | Enabled | Canvas PNG encoder. |
+| WebP | Image | Browser-dependent | Enabled only when Canvas returns genuine WebP data and output validation passes. |
+| GIF | Image | Disabled | Browser Canvas APIs do not provide reliable GIF encoding. |
+| BMP | Image | Disabled | Browser Canvas APIs do not provide reliable BMP encoding. |
+| WAV | Audio | Enabled | Encoded locally as PCM WAV. |
+| MP3 | Audio | Enabled | Encoded locally with `@breezystack/lamejs`. |
+| OGG/Opus | Audio | Disabled | Browser-native Ogg recording is not reliable across the target browsers. |
+| FLAC | Audio | Disabled | No FLAC encoder is bundled in the Community version. |
+| AAC | Audio | Disabled | No reliable standalone AAC encoder is available in the current browser-native implementation. |
+| WebM | Video | Browser-dependent | Requires an exact `MediaRecorder` WebM encoder plus capturable video and audio tracks; the resulting WebM data is validated. |
+| MP4 | Video | Disabled | Browser-native MP4 recording is not reliable enough for Phase 1. |
 
-    - Node.js 18+
-    - npm or yarn
+### Browser limitations
 
-### Install & run
+- Browser and operating-system codec support varies. Conditional formats are checked at runtime.
+- A conditional format is reported as unavailable when its exact encoder or media-capture API is missing, or when its output fails validation. ZingFiles does not fall back to a different container.
+- Audio and video decoding depends on the codecs contained in the source file, not only its extension.
+- Canvas-based image conversion creates a static image; animation from an input GIF is not preserved.
+- MP3 output currently supports mono and stereo sources. Other channel layouts return an error instead of dropping channels.
+- MediaRecorder-based conversion can take approximately the duration of the selected clip.
+- Video conversion stops with an error when the browser does not expose both source video and audio tracks, preventing silent audio loss. Video-only source files are therefore unavailable in Phase 1.
+- Large files consume browser memory and may exceed device-specific limits.
 
-    ```bash
-# Clone the repo
-    git clone https://github.com/PinkMath/ZingFile.git
-    cd your-repo
+For the most predictable results, use a current browser and keep it updated.
 
-# Install dependencies
-    npm install
+## Installation
 
-# Start the dev server
-    npm run dev
-    ```
+### Requirements
 
-    Open [http://localhost:5173](http://localhost:5173) in your browser.
+- Node.js `^20.19.0` or `>=22.12.0`
+- npm
 
-### Build for production
+```bash
+git clone https://github.com/loavy/ZingFiles.git
+cd ZingFiles
+npm install
+```
 
-    ```bash
-    npm run build
-    ```
+## Development
 
-    Output goes to the `dist/` folder — ready to deploy to any static host (Vercel, Netlify, GitHub Pages, etc.).
+Start the Vite development server:
 
-    ---
+```bash
+npm run dev
+```
 
-## 🛠 Tech Stack
+The configured development URL is [http://localhost:3000/ZingFiles/](http://localhost:3000/ZingFiles/).
 
-    | Layer | Library |
-    |---|---|
-    | Framework | React 19 + TypeScript |
-    | Build tool | Vite |
-    | Styling | Tailwind CSS |
-    | Routing | React Router DOM |
-    | MP3 encoding | @breezystack/lamejs |
-    | ZIP packaging | JSZip |
-    | Icons | Remix Icon + Font Awesome (CDN) |
+### Checks
 
-    ---
+```bash
+npm run type-check
+npm run lint
+npm test
+npm run build
+```
 
-## 📁 Project Structure
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Start the development server. |
+| `npm run type-check` | Run the TypeScript compiler without emitting files. |
+| `npm run lint` | Run ESLint. |
+| `npm test` | Run the conversion validation tests. |
+| `npm run build` | Create a production build. |
+| `npm run preview` | Preview the production build locally. |
+| `npm run deploy` | Build and publish the `out/` folder to GitHub Pages. |
 
-    ```
-    src/
-    ├── hooks/
-│   └── useFileConverter.ts   # Core conversion logic (image/audio/video)
-    ├── pages/
-    │   └── home/
-    │       ├── page.tsx
-    │       └── components/
-    │           ├── Header.tsx
-    │           ├── UploadArea.tsx
-    │           ├── FormatSelection.tsx   # Multi-format toggle picker
-    │           ├── VideoTrimmer.tsx
-    │           ├── ConversionProgress.tsx
-    │           ├── DownloadLinks.tsx     # Cards + lightbox + ZIP download
-    │           └── Footer.tsx
-    ├── router/
-    │   └── config.tsx
-    └── main.tsx
-    ```
+## Production build and deployment
 
-    ---
+```bash
+npm run build
+```
 
-## 🔒 Privacy
+Vite writes the production build to `out/`.
 
-    All file processing happens **entirely in your browser** using native Web APIs:
+The repository is configured for the GitHub Pages project path `/ZingFiles/`. To publish with the included `gh-pages` deployment command, run:
 
-    - `Canvas API` — image conversion
-    - `Web Audio API` — audio decoding and re-encoding
-    - `MediaRecorder API` — video/audio capture
-    - `lamejs` — client-side MP3 encoding
+```bash
+npm run deploy
+```
 
-    **Your files never leave your device.**
+For another static host, deploy the contents of `out/` and ensure that Vite's `base` setting matches the URL path where the application will be served.
 
-    ---
+## Technology
 
-## 📄 License
+| Area | Technology |
+| --- | --- |
+| Application | React 19 and TypeScript |
+| Build | Vite |
+| Styling | Tailwind CSS |
+| Routing | React Router |
+| Audio encoding | Web Audio API, a PCM WAV encoder, and lamejs |
+| Image encoding | Canvas API |
+| Video encoding | MediaRecorder when an exact encoder is available |
+| ZIP archives | JSZip |
+| Icons | Remix Icon |
 
-    MIT — feel free to use, modify, and distribute.
+## Roadmap
+
+The following items are planned for a future Pro version and are not available today:
+
+- Reliable FFmpeg-based audio and video conversion
+- Batch presets
+- Quality and bitrate controls
+- Metadata removal
+- Desktop packaging
+
+## License
+
+The ZingFiles Community repository is licensed under the MIT License.
