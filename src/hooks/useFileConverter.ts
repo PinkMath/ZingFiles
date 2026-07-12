@@ -1,14 +1,35 @@
-// @ts-expect-error breezystack/lamejs has no TypeScript declarations
-import lamejs from '@breezystack/lamejs';
-import { useState, useCallback } from 'react';
+import { Mp3Encoder } from '@breezystack/lamejs';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  DEFAULT_FORMATS,
+  toggleFormatSelection,
+  type AudioFormatId,
+  type FormatId,
+  type ImageFormatId,
+  type MediaCategory,
+  type OutputFormat,
+  type VideoFormatId,
+} from '@/config/formats';
+import {
+  buildUniqueOutputFileName,
+  ConversionError,
+  requireAvailableFormat,
+  validateEncodedOutput,
+  type EncodedOutput,
+} from '@/utils/conversionValidation';
+import {
+  removeAndRevokeObjectUrls,
+  revokeObjectUrls,
+} from '@/utils/objectUrlRegistry';
 
 export type ConversionStatus = 'idle' | 'converting' | 'done' | 'error';
-export type FileType = 'image' | 'audio' | 'video';
+export type FileType = MediaCategory;
 
 export interface TrimSettings {
   start: number;
-  end: number; // -1 = full duration
+  end: number;
 }
+
 export type TrimMap = Record<string, TrimSettings>;
 
 export interface ConvertedFile {
@@ -16,6 +37,8 @@ export interface ConvertedFile {
   url: string;
   size: number;
   format: string;
+  formatId: FormatId;
+  mimeType: string;
   originalName: string;
   fileType: FileType;
 }
@@ -27,455 +50,551 @@ export interface ProgressState {
   fileName: string;
 }
 
-// ─── WAV encoder ──────────────────────────────────────────────────────────────
-
-function encodeWav(buffer: AudioBuffer): ArrayBuffer {
-  const ch  = buffer.numberOfChannels;
-  const sr  = buffer.sampleRate;
-  const len = buffer.length;
-  const bps = 2;
-  const dataLen = len * ch * bps;
-  const ab   = new ArrayBuffer(44 + dataLen);
-  const view = new DataView(ab);
-  const ws = (off: number, s: string) => {
-    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
-  };
-  ws(0, 'RIFF'); view.setUint32(4, 36 + dataLen, true);
-  ws(8, 'WAVE'); ws(12, 'fmt ');
-  view.setUint32(16, 16, true);   view.setUint16(20, 1, true);
-  view.setUint16(22, ch, true);   view.setUint32(24, sr, true);
-  view.setUint32(28, sr * ch * bps, true);
-  view.setUint16(32, ch * bps, true); view.setUint16(34, 16, true);
-  ws(36, 'data'); view.setUint32(40, dataLen, true);
-  let off = 44;
-  for (let i = 0; i < len; i++) {
-    for (let c = 0; c < ch; c++) {
-      const s = Math.max(-1, Math.min(1, buffer.getChannelData(c)[i]));
-      view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      off += 2;
-    }
+function writeAscii(view: DataView, offset: number, value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index));
   }
-  return ab;
 }
 
-// ─── MP3 encoder via lamejs ───────────────────────────────────────────────────
-
-function float32ToInt16(float32: Float32Array): Int16Array {
-  const int16 = new Int16Array(float32.length);
-  for (let i = 0; i < float32.length; i++) {
-    const s = Math.max(-1, Math.min(1, float32[i]));
-    int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-  return int16;
-}
-
-function encodeMp3(buffer: AudioBuffer): Blob {
-  const channels   = buffer.numberOfChannels;
+export function encodeWav(buffer: AudioBuffer): Blob {
+  const channels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
-  const kbps       = 192;
-  const mp3enc     = new lamejs.Mp3Encoder(Math.min(channels, 2), sampleRate, kbps);
-  const blockSize  = 1152;
-  const mp3Data: Int8Array[] = [];
+  const frameCount = buffer.length;
+  const bytesPerSample = 2;
+  const dataLength = frameCount * channels * bytesPerSample;
+  const output = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(output);
 
-  const left  = float32ToInt16(buffer.getChannelData(0));
-  const right = channels > 1 ? float32ToInt16(buffer.getChannelData(1)) : left;
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, 36 + dataLength, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+  view.setUint16(32, channels * bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, dataLength, true);
 
-  for (let i = 0; i < left.length; i += blockSize) {
-    const l = left.subarray(i, i + blockSize);
-    const r = right.subarray(i, i + blockSize);
-    const encoded = channels > 1 ? mp3enc.encodeBuffer(l, r) : mp3enc.encodeBuffer(l);
-    if (encoded.length > 0) mp3Data.push(new Int8Array(encoded));
-  }
-  const tail = mp3enc.flush();
-  if (tail.length > 0) mp3Data.push(new Int8Array(tail));
-  return new Blob(mp3Data, { type: 'audio/mp3' });
-}
-
-// ─── MediaRecorder encoder (real-time, used for OGG / AAC) ───────────────────
-
-async function encodeWithMediaRecorder(
-  buffer: AudioBuffer,
-  mimeType: string,
-  ext: string,
-): Promise<{ blob: Blob; ext: string }> {
-  if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported(mimeType)) {
-    // Fallback to WAV when the browser can't natively encode the format
-    const wav = encodeWav(buffer);
-    return { blob: new Blob([wav], { type: 'audio/wav' }), ext: 'wav' };
-  }
-  return new Promise((resolve, reject) => {
-    const ctx         = new AudioContext({ sampleRate: buffer.sampleRate });
-    const destination = ctx.createMediaStreamDestination();
-    const source      = ctx.createBufferSource();
-    source.buffer     = buffer;
-    source.connect(destination);
-
-    let recorder: MediaRecorder;
-    try {
-      recorder = new MediaRecorder(destination.stream, { mimeType });
-    } catch {
-      ctx.close();
-      const wav = encodeWav(buffer);
-      resolve({ blob: new Blob([wav], { type: 'audio/wav' }), ext: 'wav' });
-      return;
-    }
-
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-    recorder.onstop = () => {
-      ctx.close();
-      resolve({ blob: new Blob(chunks, { type: mimeType }), ext });
-    };
-    recorder.onerror = (e) => { ctx.close(); reject(e); };
-
-    recorder.start(100);
-    source.start(0);
-    source.onended = () => setTimeout(() => recorder.stop(), 200);
-  });
-}
-
-// ─── Unified audio buffer → target format ────────────────────────────────────
-
-async function encodeAudioBuffer(
-  buffer: AudioBuffer,
-  targetFmt: string,
-): Promise<{ blob: Blob; ext: string }> {
-  switch (targetFmt) {
-    case 'mp3': {
-      const blob = encodeMp3(buffer);
-      return { blob, ext: 'mp3' };
-    }
-    case 'ogg': {
-      // Try ogg/opus (Firefox) then webm/opus (Chrome) — same codec, different container
-      const ogg  = 'audio/ogg;codecs=opus';
-      const webm = 'audio/webm;codecs=opus';
-      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(ogg)) {
-        return encodeWithMediaRecorder(buffer, ogg, 'ogg');
-      }
-      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(webm)) {
-        return encodeWithMediaRecorder(buffer, webm, 'ogg');
-      }
-      // Fallback WAV
-      const wav = encodeWav(buffer);
-      return { blob: new Blob([wav], { type: 'audio/wav' }), ext: 'wav' };
-    }
-    case 'aac': {
-      const mp4  = 'audio/mp4;codecs=mp4a.40.2';
-      const mp4b = 'audio/mp4';
-      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mp4)) {
-        return encodeWithMediaRecorder(buffer, mp4, 'aac');
-      }
-      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mp4b)) {
-        return encodeWithMediaRecorder(buffer, mp4b, 'aac');
-      }
-      // Fallback WAV
-      const wav = encodeWav(buffer);
-      return { blob: new Blob([wav], { type: 'audio/wav' }), ext: 'wav' };
-    }
-    case 'flac':
-    case 'wav':
-    default: {
-      const wav = encodeWav(buffer);
-      const ext = targetFmt === 'flac' ? 'flac' : 'wav';
-      return { blob: new Blob([wav], { type: 'audio/wav' }), ext };
+  const channelData = Array.from(
+    { length: channels },
+    (_, channel) => buffer.getChannelData(channel),
+  );
+  let offset = 44;
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    for (let channel = 0; channel < channels; channel += 1) {
+      const sample = Math.max(-1, Math.min(1, channelData[channel][frame]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += bytesPerSample;
     }
   }
+
+  return new Blob([output], { type: 'audio/wav' });
 }
 
-// Trim an AudioBuffer to [start, end] seconds
-function sliceAudioBuffer(buffer: AudioBuffer, start: number, end: number): AudioBuffer {
-  const sr         = buffer.sampleRate;
-  const startFrame = Math.floor(start * sr);
-  const endFrame   = Math.min(Math.ceil(end * sr), buffer.length);
-  const length     = Math.max(1, endFrame - startFrame);
-  const out        = new AudioContext().createBuffer(buffer.numberOfChannels, length, sr);
-  for (let c = 0; c < buffer.numberOfChannels; c++) {
-    out.getChannelData(c).set(buffer.getChannelData(c).subarray(startFrame, endFrame));
+function float32ToInt16(input: Float32Array): Int16Array {
+  const output = new Int16Array(input.length);
+  for (let index = 0; index < input.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, input[index]));
+    output[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
   }
-  return out;
+  return output;
 }
 
-// ─── Audio conversion ─────────────────────────────────────────────────────────
+export function encodeMp3(buffer: AudioBuffer): Blob {
+  if (buffer.numberOfChannels < 1 || buffer.numberOfChannels > 2) {
+    throw new ConversionError(
+      'MP3 conversion currently supports mono and stereo audio only.',
+      'FORMAT_UNAVAILABLE',
+    );
+  }
+
+  const encoder = new Mp3Encoder(buffer.numberOfChannels, buffer.sampleRate, 192);
+  const blockSize = 1152;
+  const chunks: Uint8Array[] = [];
+  const left = float32ToInt16(buffer.getChannelData(0));
+  const right = buffer.numberOfChannels === 2
+    ? float32ToInt16(buffer.getChannelData(1))
+    : undefined;
+
+  for (let offset = 0; offset < left.length; offset += blockSize) {
+    const leftBlock = left.subarray(offset, offset + blockSize);
+    const rightBlock = right?.subarray(offset, offset + blockSize);
+    const encoded = encoder.encodeBuffer(leftBlock, rightBlock);
+    if (encoded.length > 0) chunks.push(new Uint8Array(encoded));
+  }
+
+  const tail = encoder.flush();
+  if (tail.length > 0) chunks.push(new Uint8Array(tail));
+  return new Blob(chunks, { type: 'audio/mpeg' });
+}
 
 async function convertAudio(
-  file: File, targetFmt: string, onProgress: (p: number) => void,
-): Promise<{ blob: Blob; ext: string }> {
-  onProgress(10);
-  const ab  = await file.arrayBuffer();
-  onProgress(30);
-  const ctx = new AudioContext();
-  const buf = await ctx.decodeAudioData(ab);
-  onProgress(55);
-  ctx.close();
-  onProgress(65);
-  const result = await encodeAudioBuffer(buf, targetFmt);
-  onProgress(95);
-  return result;
+  file: File,
+  format: OutputFormat,
+  onProgress: (percent: number) => void,
+  signal: AbortSignal,
+): Promise<EncodedOutput> {
+  const context = new AudioContext();
+  try {
+    signal.throwIfAborted();
+    onProgress(10);
+    const fileData = await file.arrayBuffer();
+    signal.throwIfAborted();
+    onProgress(30);
+    let decoded: AudioBuffer;
+    try {
+      decoded = await context.decodeAudioData(fileData);
+    } catch {
+      throw new Error('This browser could not decode the source audio file.');
+    }
+    signal.throwIfAborted();
+    onProgress(60);
+
+    let blob: Blob;
+    if (format.id === 'wav') {
+      blob = encodeWav(decoded);
+    } else if (format.id === 'mp3') {
+      blob = encodeMp3(decoded);
+    } else {
+      throw new ConversionError(
+        `${format.name} audio encoding is unavailable.`,
+        'FORMAT_UNAVAILABLE',
+      );
+    }
+
+    onProgress(90);
+    return await validateEncodedOutput(format, blob);
+  } finally {
+    await context.close().catch(() => undefined);
+  }
 }
 
-// ─── Image conversion ─────────────────────────────────────────────────────────
+async function loadImage(url: string, signal: AbortSignal): Promise<HTMLImageElement> {
+  const image = new Image();
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      signal.removeEventListener('abort', abort);
+      image.onload = null;
+      image.onerror = null;
+    };
+    const abort = () => {
+      cleanup();
+      image.src = '';
+      reject(signal.reason);
+    };
+    image.onload = () => {
+      cleanup();
+      resolve();
+    };
+    image.onerror = () => {
+      cleanup();
+      reject(new Error('This browser could not decode the source image.'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) {
+      abort();
+      return;
+    }
+    image.src = url;
+  });
+  return image;
+}
 
 async function convertImage(
-  file: File, targetFmt: string, onProgress: (p: number) => void,
-): Promise<{ blob: Blob; ext: string }> {
-  onProgress(15);
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = rej; img.src = url; });
-  URL.revokeObjectURL(url);
-  onProgress(50);
+  file: File,
+  format: OutputFormat,
+  onProgress: (percent: number) => void,
+  signal: AbortSignal,
+): Promise<EncodedOutput> {
+  const inputUrl = URL.createObjectURL(file);
+  let image: HTMLImageElement | undefined;
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
-  const ctx = canvas.getContext('2d')!;
-  if (['jpg', 'jpeg', 'bmp'].includes(targetFmt)) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
-  ctx.drawImage(img, 0, 0);
-  onProgress(75);
-  const mimeMap: Record<string, string> = {
-    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
-    webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp',
-  };
-  const mime = mimeMap[targetFmt] ?? 'image/jpeg';
-  const ext  = targetFmt === 'jpeg' ? 'jpg' : targetFmt;
-  const blob = await new Promise<Blob>((res, rej) =>
-    canvas.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), mime, 0.95));
-  onProgress(95);
-  return { blob, ext };
-}
-
-// ─── Audio-only extraction from video ─────────────────────────────────────────
-
-async function extractAudioFromVideo(
-  file: File, trimStart: number, trimEnd: number,
-  targetAudioFmt: string,
-  onProgress: (p: number) => void,
-): Promise<{ blob: Blob; ext: string }> {
-  onProgress(10);
-  const ab  = await file.arrayBuffer();
-  onProgress(35);
-  const ctx = new AudioContext();
-  let buf: AudioBuffer;
   try {
-    buf = await ctx.decodeAudioData(ab);
-  } catch {
-    ctx.close();
-    throw new Error('Could not decode audio from this video file — it may have no audio track.');
+    onProgress(15);
+    image = await loadImage(inputUrl, signal);
+    signal.throwIfAborted();
+    if (image.naturalWidth === 0 || image.naturalHeight === 0) {
+      throw new Error('The source image has invalid dimensions.');
+    }
+
+    onProgress(45);
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Canvas image conversion is unavailable in this browser.');
+
+    if (format.id === 'jpg') {
+      context.fillStyle = '#fff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    context.drawImage(image, 0, 0);
+    onProgress(70);
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (result) => {
+          if (result) resolve(result);
+          else reject(new Error(`${format.name} encoding returned no data.`));
+        },
+        format.mimeType,
+        0.92,
+      );
+    });
+
+    signal.throwIfAborted();
+    onProgress(90);
+    return await validateEncodedOutput(format, blob);
+  } finally {
+    if (image) {
+      image.onload = null;
+      image.onerror = null;
+      image.src = '';
+    }
+    canvas.width = 0;
+    canvas.height = 0;
+    URL.revokeObjectURL(inputUrl);
   }
-  onProgress(55);
-  ctx.close();
-  const start  = Math.max(0, trimStart);
-  const end    = trimEnd < 0 ? buf.duration : Math.min(trimEnd, buf.duration);
-  const sliced = (start > 0 || end < buf.duration) ? sliceAudioBuffer(buf, start, end) : buf;
-  onProgress(65);
-  const result = await encodeAudioBuffer(sliced, targetAudioFmt);
-  onProgress(95);
-  return result;
 }
 
-// ─── Video conversion ─────────────────────────────────────────────────────────
+type CapturableVideo = HTMLVideoElement & {
+  captureStream?: () => MediaStream;
+  mozCaptureStream?: () => MediaStream;
+};
 
-function pickMime(): string {
-  const candidates = [
-    'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus',
-    'video/webm;codecs=vp9',      'video/webm;codecs=vp8',
-    'video/webm',                 'video/mp4',
-  ];
-  for (const c of candidates) {
-    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(c)) return c;
-  }
-  return 'video/webm';
+function readableBrowserError(error: unknown, fallback: string): Error {
+  if (error instanceof Error && error.message) return error;
+  return new Error(fallback);
 }
 
 async function convertVideo(
   file: File,
-  targetFmt: string,
+  format: OutputFormat,
+  recorderMimeType: string,
   trimStart: number,
   trimEnd: number,
-  removeAudio: boolean,
-  audioOnlyFmt: string,
-  onProgress: (p: number) => void,
-): Promise<{ blob: Blob; ext: string }> {
-  // ── Audio-only mode ───────────────────────────────────────────────────────
-  if (targetFmt === 'audio-only') {
-    return extractAudioFromVideo(file, trimStart, trimEnd, audioOnlyFmt, onProgress);
-  }
+  onProgress: (percent: number) => void,
+  signal: AbortSignal,
+): Promise<EncodedOutput> {
+  return new Promise<EncodedOutput>((resolve, reject) => {
+    const inputUrl = URL.createObjectURL(file);
+    const video = document.createElement('video') as CapturableVideo;
+    let sourceStream: MediaStream | undefined;
+    let recorder: MediaRecorder | undefined;
+    let progressTimer: ReturnType<typeof setInterval> | undefined;
+    let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastMediaTime = 0;
+    let settled = false;
+    let cleaned = false;
+    let stopRequested = false;
 
-  // ── Video mode ────────────────────────────────────────────────────────────
-  return new Promise((resolve, reject) => {
-    onProgress(5);
-    const url     = URL.createObjectURL(file);
-    const videoEl = document.createElement('video');
-    videoEl.src         = url;
-    videoEl.preload     = 'auto';
-    videoEl.crossOrigin = 'anonymous';
-    videoEl.playsInline = true;
-    // Always mute the element — we capture audio via Web Audio API, not native output.
-    // This prevents audio from leaking through speakers during conversion.
-    videoEl.muted = true;
+    function abort() {
+      fail(signal.reason, `${format.name} conversion was cancelled.`);
+    }
 
-    videoEl.onloadedmetadata = () => {
-      onProgress(10);
-      const actualStart = Math.max(0, trimStart);
-      const actualEnd   = trimEnd < 0 ? videoEl.duration : Math.min(trimEnd, videoEl.duration);
-      const clipDur     = Math.max(0.1, actualEnd - actualStart);
-
-      const W = videoEl.videoWidth  || 1280;
-      const H = videoEl.videoHeight || 720;
-      const canvas = document.createElement('canvas');
-      canvas.width = W; canvas.height = H;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) { reject(new Error('Canvas not supported')); return; }
-
-      // ── Audio capture via captureStream ────────────────────────────────────
-      // We call captureStream() BEFORE seeking/playing so the browser registers
-      // the element as a capture source immediately.
-      // The `muted` attribute only suppresses speaker output — audio tracks in
-      // the returned MediaStream are always live and carry real audio data.
-      type AnyVideo = HTMLVideoElement & {
-        captureStream?:    () => MediaStream;
-        mozCaptureStream?: () => MediaStream;
-      };
-      let audioTracks: MediaStreamTrack[] = [];
-      if (!removeAudio) {
+    function cleanup() {
+      if (cleaned) return;
+      cleaned = true;
+      signal.removeEventListener('abort', abort);
+      if (progressTimer !== undefined) clearInterval(progressTimer);
+      if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
+      sourceStream?.getTracks().forEach((track) => {
         try {
-          const rawStream =
-            (videoEl as AnyVideo).captureStream?.() ??
-            (videoEl as AnyVideo).mozCaptureStream?.();
-          if (rawStream) audioTracks = rawStream.getAudioTracks();
-        } catch (_) { /* no audio — carry on */ }
-      }
-
-      const canvasStream = canvas.captureStream(60);
-      const combined     = new MediaStream([
-        ...canvasStream.getVideoTracks(),
-        ...audioTracks,
-      ]);
-
-      const chosenMime = pickMime();
-      let recorder: MediaRecorder;
-      try {
-        recorder = new MediaRecorder(combined, {
-          mimeType: chosenMime,
-          videoBitsPerSecond: 8_000_000,
-          audioBitsPerSecond: 192_000,
-        });
-      } catch (_) {
-        try { recorder = new MediaRecorder(combined, { mimeType: chosenMime }); }
-        catch (__) { recorder = new MediaRecorder(combined); }
-      }
-
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-      recorder.onstop = () => {
-        URL.revokeObjectURL(url);
-        const mimeUsed = recorder.mimeType || chosenMime;
-        const ext = mimeUsed.includes('mp4') ? 'mp4' : 'webm';
-        resolve({ blob: new Blob(chunks, { type: mimeUsed }), ext });
-      };
-
-      let rafId: number;
-      let stopped = false;
-      const stopRecording = () => {
-        if (stopped) return;
-        stopped = true;
-        cancelAnimationFrame(rafId);
-        ctx.drawImage(videoEl, 0, 0, W, H);
-        onProgress(96);
-        // Give MediaRecorder a moment to flush its final chunk before stopping
-        setTimeout(() => {
-          try { if (recorder.state !== 'inactive') recorder.stop(); }
-          catch (_) { /* already stopped */ }
-        }, 300);
-      };
-
-      const drawFrame = () => {
-        if (videoEl.currentTime >= actualEnd) {
-          stopRecording();
-          return;
+          track.stop();
+        } catch {
+          // The browser already ended this captured track.
         }
-        ctx.drawImage(videoEl, 0, 0, W, H);
-        const elapsed = Math.max(0, videoEl.currentTime - actualStart);
-        onProgress(Math.min(10 + (elapsed / clipDur) * 85, 94));
-        rafId = requestAnimationFrame(drawFrame);
-      };
+      });
+      if (recorder) {
+        recorder.ondataavailable = null;
+        recorder.onstop = null;
+        recorder.onerror = null;
+        if (recorder.state !== 'inactive') {
+          try {
+            recorder.stop();
+          } catch {
+            // The recorder is already stopping or failed before it became active.
+          }
+        }
+      }
+      try {
+        video.pause();
+      } catch {
+        // The media element never reached a playable state.
+      }
+      video.onloadedmetadata = null;
+      video.onseeked = null;
+      video.ontimeupdate = null;
+      video.onended = null;
+      video.onerror = null;
+      video.removeAttribute('src');
+      try {
+        video.load();
+      } catch {
+        // Removing the source URL is sufficient when load() is unavailable.
+      }
+      URL.revokeObjectURL(inputUrl);
+    }
 
-      videoEl.onplay  = () => { rafId = requestAnimationFrame(drawFrame); };
-      // Safety net: video ended naturally (e.g. trimEnd == full duration)
-      videoEl.onended = () => stopRecording();
-      videoEl.onerror = (e) => reject(e);
+    function fail(error: unknown, fallback: string) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(readableBrowserError(error, fallback));
+    }
 
-      videoEl.currentTime = actualStart;
-      videoEl.onseeked    = () => {
-        recorder.start(100);
-        videoEl.play().catch(reject);
-      };
+    function armWatchdog(timeout: number, message: string) {
+      if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
+      watchdogTimer = setTimeout(() => fail(undefined, message), timeout);
+    }
+
+    const chunks: Blob[] = [];
+    video.preload = 'auto';
+    video.playsInline = true;
+    video.muted = true;
+
+    video.onerror = () => {
+      fail(undefined, 'This browser could not decode the source video file.');
     };
 
-    videoEl.onerror = reject;
+    video.onloadedmetadata = () => {
+      try {
+        if (!Number.isFinite(video.duration) || video.duration <= 0) {
+          throw new Error('The source video duration is unavailable.');
+        }
+        const actualStart = Math.max(0, trimStart);
+        const actualEnd = trimEnd < 0
+          ? video.duration
+          : Math.min(trimEnd, video.duration);
+        if (actualEnd <= actualStart) {
+          throw new Error('The selected video trim range is empty.');
+        }
+
+        const capture = video.captureStream ?? video.mozCaptureStream;
+        if (!capture) {
+          throw new ConversionError(
+            'This browser cannot capture video media for WebM conversion.',
+            'FORMAT_UNAVAILABLE',
+          );
+        }
+        sourceStream = capture.call(video);
+        if (sourceStream.getVideoTracks().length === 0) {
+          throw new Error('The browser did not expose a capturable video track.');
+        }
+        if (sourceStream.getAudioTracks().length === 0) {
+          throw new Error(
+            'No capturable audio track was found. The conversion was stopped to avoid silently removing source audio.',
+          );
+        }
+
+        try {
+          recorder = new MediaRecorder(sourceStream, {
+            mimeType: recorderMimeType,
+            videoBitsPerSecond: 8_000_000,
+            audioBitsPerSecond: 192_000,
+          });
+        } catch (error) {
+          throw new ConversionError(
+            `The browser reported ${format.name} support but could not start its encoder: ${readableBrowserError(error, 'unknown recorder error').message}`,
+            'FORMAT_UNAVAILABLE',
+          );
+        }
+
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) chunks.push(event.data);
+        };
+        recorder.onerror = () => {
+          fail(undefined, `${format.name} recording failed in this browser.`);
+        };
+        recorder.onstop = () => {
+          if (settled) return;
+          settled = true;
+          try {
+            const actualMimeType = recorder?.mimeType ?? '';
+            const outputBlob = new Blob(chunks, { type: actualMimeType });
+            cleanup();
+            void validateEncodedOutput(format, outputBlob).then(resolve, reject);
+          } catch (error) {
+            cleanup();
+            reject(readableBrowserError(error, `${format.name} output could not be finalized.`));
+          }
+        };
+
+        const stopRecording = () => {
+          if (stopRequested || !recorder || recorder.state === 'inactive') return;
+          stopRequested = true;
+          video.pause();
+          onProgress(95);
+          armWatchdog(15_000, `${format.name} encoder did not finish the output file.`);
+          try {
+            recorder.stop();
+          } catch (error) {
+            fail(error, `${format.name} recording could not be stopped.`);
+          }
+        };
+        const updateProgress = () => {
+          if (stopRequested) return;
+          const elapsed = Math.max(0, video.currentTime - actualStart);
+          const clipDuration = actualEnd - actualStart;
+          onProgress(Math.min(10 + (elapsed / clipDuration) * 84, 94));
+          if (video.currentTime > lastMediaTime + 0.01) {
+            lastMediaTime = video.currentTime;
+            armWatchdog(30_000, `${format.name} conversion stalled during playback.`);
+          }
+          if (video.currentTime >= actualEnd) stopRecording();
+        };
+
+        video.ontimeupdate = updateProgress;
+        video.onended = stopRecording;
+        const beginRecording = () => {
+          if (!recorder) return;
+          try {
+            recorder.start(250);
+          } catch (error) {
+            fail(error, `${format.name} recording could not start.`);
+            return;
+          }
+          lastMediaTime = video.currentTime;
+          armWatchdog(30_000, `${format.name} conversion stalled during playback.`);
+          progressTimer = setInterval(updateProgress, 100);
+          void video.play().catch((error) => {
+            fail(error, 'The browser blocked video playback needed for conversion.');
+          });
+        };
+
+        onProgress(10);
+        armWatchdog(20_000, `${format.name} conversion could not start after loading the video.`);
+        if (Math.abs(video.currentTime - actualStart) < 0.01) {
+          beginRecording();
+        } else {
+          video.onseeked = () => {
+            video.onseeked = null;
+            beginRecording();
+          };
+          video.currentTime = actualStart;
+        }
+      } catch (error) {
+        fail(error, `${format.name} conversion could not be initialized.`);
+      }
+    };
+
+    onProgress(5);
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) {
+      abort();
+      return;
+    }
+    armWatchdog(20_000, 'The browser did not load the source video metadata in time.');
+    video.src = inputUrl;
   });
 }
 
-// ─── Hook ─────────────────────────────────────────────────────────────────────
-
-function getFileType(f: File): FileType {
-  if (f.type.startsWith('image/')) return 'image';
-  if (f.type.startsWith('audio/')) return 'audio';
-  if (f.type.startsWith('video/')) return 'video';
-  return 'image';
+export function getFileType(file: File): FileType | null {
+  if (file.type.startsWith('image/')) return 'image';
+  if (file.type.startsWith('audio/')) return 'audio';
+  if (file.type.startsWith('video/')) return 'video';
+  return null;
 }
 
 export function useFileConverter() {
-  const [files,    setFiles]    = useState<File[]>([]);
-  const [trimMap,  setTrimMap]  = useState<TrimMap>({});
-
-  const [imageFormats,      setImageFormats]      = useState<string[]>(['webp']);
-  const [audioFormats,      setAudioFormats]      = useState<string[]>(['wav']);
-  const [videoFormats,      setVideoFormats]      = useState<string[]>(['webm']);
-  const [videoAudioFormat,  setVideoAudioFormat]  = useState('wav');
-
-  const [status,       setStatus]       = useState<ConversionStatus>('idle');
-  const [progress,     setProgress]     = useState<ProgressState>({ current: 0, total: 0, percent: 0, fileName: '' });
+  const [files, setFiles] = useState<File[]>([]);
+  const [trimMap, setTrimMap] = useState<TrimMap>({});
+  const [imageFormats, setImageFormats] = useState<ImageFormatId[]>([DEFAULT_FORMATS.image]);
+  const [audioFormats, setAudioFormats] = useState<AudioFormatId[]>([DEFAULT_FORMATS.audio]);
+  const [videoFormats, setVideoFormats] = useState<VideoFormatId[]>([DEFAULT_FORMATS.video]);
+  const [status, setStatus] = useState<ConversionStatus>('idle');
+  const [progress, setProgress] = useState<ProgressState>({
+    current: 0,
+    total: 0,
+    percent: 0,
+    fileName: '',
+  });
   const [convertedMap, setConvertedMap] = useState<Record<string, ConvertedFile>>({});
-  const [error,        setError]        = useState<string | null>(null);
+  const convertedMapRef = useRef<Record<string, ConvertedFile>>({});
+  const activeConversionRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Toggle a format in/out of a multi-select list (always keep at least one)
-  const makeToggler = (setter: React.Dispatch<React.SetStateAction<string[]>>) =>
-    (fmt: string) =>
-      setter((prev) =>
-        prev.includes(fmt)
-          ? prev.length > 1 ? prev.filter((f) => f !== fmt) : prev
-          : [...prev, fmt],
-      );
+  useEffect(() => {
+    convertedMapRef.current = convertedMap;
+  }, [convertedMap]);
 
-  const toggleImageFormat = useCallback(makeToggler(setImageFormats), []);
-  const toggleAudioFormat = useCallback(makeToggler(setAudioFormats), []);
-  const toggleVideoFormat = useCallback(makeToggler(setVideoFormats), []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      activeConversionRef.current?.abort(new DOMException('Conversion cancelled.', 'AbortError'));
+      revokeObjectUrls(Object.values(convertedMapRef.current));
+      convertedMapRef.current = {};
+    };
+  }, []);
+
+  const toggleImageFormat = useCallback((format: ImageFormatId) => {
+    setImageFormats((current) => toggleFormatSelection(current, format));
+  }, []);
+  const toggleAudioFormat = useCallback((format: AudioFormatId) => {
+    setAudioFormats((current) => toggleFormatSelection(current, format));
+  }, []);
+  const toggleVideoFormat = useCallback((format: VideoFormatId) => {
+    setVideoFormats((current) => toggleFormatSelection(current, format));
+  }, []);
 
   const addFiles = useCallback((incoming: File[]) => {
-    setFiles((prev) => {
-      const names = new Set(prev.map((f) => f.name));
-      const fresh = incoming.filter((f) => !names.has(f.name));
-      setTrimMap((m) => {
-        const next = { ...m };
-        fresh.filter((f) => f.type.startsWith('video/')).forEach((f) => {
-          if (!next[f.name]) next[f.name] = { start: 0, end: -1 };
-        });
-        return next;
-      });
-      return [...prev, ...fresh];
+    const accepted = incoming.filter((file) => getFileType(file) !== null);
+    const rejected = incoming.filter((file) => getFileType(file) === null);
+
+    setFiles((current) => {
+      const names = new Set(current.map((file) => file.name));
+      const fresh = accepted.filter((file) => !names.has(file.name));
+      return [...current, ...fresh];
     });
-    setError(null);
+    setTrimMap((current) => {
+      const next = { ...current };
+      for (const file of accepted) {
+        if (getFileType(file) === 'video' && !next[file.name]) {
+          next[file.name] = { start: 0, end: -1 };
+        }
+      }
+      return next;
+    });
+
+    if (rejected.length > 0) {
+      setError(`Unsupported file type: ${rejected.map((file) => file.name).join(', ')}.`);
+      setStatus('error');
+    } else {
+      setError(null);
+      setStatus((current) => current === 'error' ? 'idle' : current);
+    }
   }, []);
 
   const setTrim = useCallback((fileName: string, start: number, end: number) => {
-    setTrimMap((m) => ({ ...m, [fileName]: { start, end } }));
+    setTrimMap((current) => ({ ...current, [fileName]: { start, end } }));
+    setConvertedMap((current) => {
+      const next = removeAndRevokeObjectUrls(
+        current,
+        (converted) => converted.originalName === fileName && converted.fileType === 'video',
+      );
+      convertedMapRef.current = next;
+      return next;
+    });
   }, []);
 
   const removeFile = useCallback((name: string) => {
-    setFiles((prev) => prev.filter((f) => f.name !== name));
-    setTrimMap((m) => { const n = { ...m }; delete n[name]; return n; });
-    setConvertedMap((prev) => {
-      const next = { ...prev };
-      Object.keys(next).forEach((k) => { if (k.startsWith(`${name}::`)) delete next[k]; });
+    setFiles((current) => current.filter((file) => file.name !== name));
+    setTrimMap((current) => {
+      const next = { ...current };
+      delete next[name];
+      return next;
+    });
+    setConvertedMap((current) => {
+      const next = removeAndRevokeObjectUrls(
+        current,
+        (converted) => converted.originalName === name,
+      );
+      convertedMapRef.current = next;
       return next;
     });
   }, []);
@@ -483,85 +602,167 @@ export function useFileConverter() {
   const reorderFiles = useCallback((ordered: File[]) => setFiles(ordered), []);
 
   const clearAll = useCallback(() => {
-    setFiles([]); setConvertedMap({}); setTrimMap({});
-    setStatus('idle'); setError(null);
+    activeConversionRef.current?.abort(new DOMException('Conversion cancelled.', 'AbortError'));
+    activeConversionRef.current = null;
+    revokeObjectUrls(Object.values(convertedMapRef.current));
+    convertedMapRef.current = {};
+    setFiles([]);
+    setConvertedMap({});
+    setTrimMap({});
+    setProgress({ current: 0, total: 0, percent: 0, fileName: '' });
+    setStatus('idle');
+    setError(null);
   }, []);
 
   const convert = useCallback(async () => {
-    // Build list of (file, format) pairs that haven't been converted yet
-    type Job = { file: File; format: string };
+    type Job = { file: File; formatId: FormatId; category: FileType };
     const jobs: Job[] = [];
     for (const file of files) {
-      const ftype = getFileType(file);
-      const fmts  = ftype === 'image' ? imageFormats : ftype === 'audio' ? audioFormats : videoFormats;
-      for (const fmt of fmts) {
-        const key = `${file.name}::${fmt}`;
-        if (!convertedMap[key]) jobs.push({ file, format: fmt });
+      const category = getFileType(file);
+      if (!category) continue;
+      const selectedFormats = category === 'image'
+        ? imageFormats
+        : category === 'audio'
+          ? audioFormats
+          : videoFormats;
+      for (const formatId of selectedFormats) {
+        if (!convertedMap[`${file.name}::${formatId}`]) {
+          jobs.push({ file, formatId, category });
+        }
       }
     }
     if (jobs.length === 0) return;
 
-    setStatus('converting'); setError(null);
-    const newConverted: Record<string, ConvertedFile> = {};
+    activeConversionRef.current?.abort(new DOMException('A new conversion started.', 'AbortError'));
+    const controller = new AbortController();
+    activeConversionRef.current = controller;
+    setStatus('converting');
+    setError(null);
 
-    for (let i = 0; i < jobs.length; i++) {
-      const { file, format } = jobs[i];
-      const ftype = getFileType(file);
-      const label = format.toUpperCase();
-      const fp    = (p: number) => setProgress({
-        current: i + 1, total: jobs.length,
-        percent: Math.round(((i / jobs.length) + (p / 100) / jobs.length) * 100),
-        fileName: `${file.name} → ${label}`,
-      });
-      fp(0);
+    for (let index = 0; index < jobs.length; index += 1) {
+      const { file, formatId, category } = jobs[index];
+      const updateProgress = (jobPercent: number) => {
+        const overallPercent = Math.round(
+          ((index / jobs.length) + (jobPercent / 100 / jobs.length)) * 100,
+        );
+        setProgress({
+          current: index + 1,
+          total: jobs.length,
+          percent: overallPercent,
+          fileName: `${file.name} → ${formatId.toUpperCase()}`,
+        });
+      };
+
       try {
-        let blob: Blob; let ext: string;
-        if (ftype === 'audio') {
-          ({ blob, ext } = await convertAudio(file, format, fp));
-        } else if (ftype === 'video') {
-          const trim = trimMap[file.name] ?? { start: 0, end: -1 };
-          ({ blob, ext } = await convertVideo(file, format, trim.start, trim.end, false, videoAudioFormat, fp));
+        updateProgress(0);
+        const { format, recorderMimeType } = requireAvailableFormat(category, formatId);
+        let output: EncodedOutput;
+        if (category === 'image') {
+          output = await convertImage(file, format, updateProgress, controller.signal);
+        } else if (category === 'audio') {
+          output = await convertAudio(file, format, updateProgress, controller.signal);
         } else {
-          ({ blob, ext } = await convertImage(file, format, fp));
+          const trim = trimMap[file.name] ?? { start: 0, end: -1 };
+          if (!recorderMimeType) {
+            throw new ConversionError(
+              `${format.name} recording is unavailable in this browser.`,
+              'FORMAT_UNAVAILABLE',
+            );
+          }
+          output = await convertVideo(
+            file,
+            format,
+            recorderMimeType,
+            trim.start,
+            trim.end,
+            updateProgress,
+            controller.signal,
+          );
         }
-        fp(99);
-        const base = file.name.replace(/\.[^.]+$/, '');
-        const outFileType: FileType = (format === 'audio-only' && ftype === 'video') ? 'audio' : ftype;
-        const key = `${file.name}::${format}`;
-        newConverted[key] = {
-          name: `${base}.${ext}`, url: URL.createObjectURL(blob),
-          size: blob.size, format: ext.toUpperCase(),
-          originalName: file.name, fileType: outFileType,
+
+        if (controller.signal.aborted || !mountedRef.current) return;
+        updateProgress(99);
+        const outputName = buildUniqueOutputFileName(
+          file.name,
+          output.format,
+          Object.values(convertedMapRef.current).map((converted) => converted.name),
+        );
+        const converted: ConvertedFile = {
+          name: outputName,
+          url: URL.createObjectURL(output.blob),
+          size: output.blob.size,
+          format: output.format.name,
+          formatId: output.format.id,
+          mimeType: output.format.mimeType,
+          originalName: file.name,
+          fileType: category,
         };
-      } catch (err) {
-        setError(`Failed to convert "${file.name}" → ${label}: ${err instanceof Error ? err.message : String(err)}`);
-        setStatus('error'); return;
+        const key = `${file.name}::${formatId}`;
+        const nextConvertedMap = { ...convertedMapRef.current, [key]: converted };
+        convertedMapRef.current = nextConvertedMap;
+        setConvertedMap(nextConvertedMap);
+      } catch (caught) {
+        if (controller.signal.aborted || !mountedRef.current) return;
+        const message = readableBrowserError(caught, 'Unknown conversion error.').message;
+        setError(`Failed to convert "${file.name}" to ${formatId.toUpperCase()}: ${message}`);
+        setStatus('error');
+        if (activeConversionRef.current === controller) activeConversionRef.current = null;
+        return;
       }
     }
-    setProgress({ current: jobs.length, total: jobs.length, percent: 100, fileName: '' });
-    setConvertedMap((prev) => ({ ...prev, ...newConverted }));
+
+    setProgress({
+      current: jobs.length,
+      total: jobs.length,
+      percent: 100,
+      fileName: '',
+    });
     setStatus('done');
-  }, [files, convertedMap, trimMap, imageFormats, audioFormats, videoFormats, videoAudioFormat]);
+    if (activeConversionRef.current === controller) activeConversionRef.current = null;
+  }, [
+    files,
+    convertedMap,
+    trimMap,
+    imageFormats,
+    audioFormats,
+    videoFormats,
+  ]);
 
-  const results = Object.values(convertedMap);
-
-  // Count total pending (file × format) jobs
-  const pendingCount = files.reduce((acc, f) => {
-    const ftype = getFileType(f);
-    const fmts  = ftype === 'image' ? imageFormats : ftype === 'audio' ? audioFormats : videoFormats;
-    return acc + fmts.filter((fmt) => !convertedMap[`${f.name}::${fmt}`]).length;
+  const pendingCount = files.reduce((total, file) => {
+    const category = getFileType(file);
+    if (!category) return total;
+    const selectedFormats = category === 'image'
+      ? imageFormats
+      : category === 'audio'
+        ? audioFormats
+        : videoFormats;
+    return total + selectedFormats.filter(
+      (formatId) => !convertedMap[`${file.name}::${formatId}`],
+    ).length;
   }, 0);
 
   return {
-    files, addFiles, removeFile, reorderFiles, clearAll,
-    trimMap, setTrim,
-    imageFormats, toggleImageFormat,
-    audioFormats, toggleAudioFormat,
-    videoFormats, toggleVideoFormat,
-    videoAudioFormat, setVideoAudioFormat,
-    status, progress, results, pendingCount, error, convert,
-    hasImages: files.some((f) => getFileType(f) === 'image'),
-    hasAudio:  files.some((f) => getFileType(f) === 'audio'),
-    hasVideo:  files.some((f) => getFileType(f) === 'video'),
+    files,
+    addFiles,
+    removeFile,
+    reorderFiles,
+    clearAll,
+    trimMap,
+    setTrim,
+    imageFormats,
+    toggleImageFormat,
+    audioFormats,
+    toggleAudioFormat,
+    videoFormats,
+    toggleVideoFormat,
+    status,
+    progress,
+    results: Object.values(convertedMap),
+    pendingCount,
+    error,
+    convert,
+    hasImages: files.some((file) => getFileType(file) === 'image'),
+    hasAudio: files.some((file) => getFileType(file) === 'audio'),
+    hasVideo: files.some((file) => getFileType(file) === 'video'),
   };
 }

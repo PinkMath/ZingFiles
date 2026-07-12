@@ -1,4 +1,4 @@
-import { ConversionStatus, ProgressState } from '@/hooks/useFileConverter';
+import type { ConversionStatus, ProgressState } from '@/hooks/useFileConverter';
 import { useEffect, useState } from 'react';
 
 interface Props {
@@ -10,9 +10,9 @@ interface Props {
 const STATUS_MESSAGES: Record<string, string[]> = {
   converting: [
     'Reading file data…',
-    'Decoding pixels…',
-    'Applying format encoding…',
-    'Optimising output…',
+    'Decoding in your browser…',
+    'Encoding the selected format…',
+    'Validating MIME type and file signature…',
     'Almost there…',
   ],
 };
@@ -31,6 +31,8 @@ export default function ConversionProgress({ status, progress, error }: Props) {
   return (
     <section className="w-full max-w-4xl mx-auto px-4">
       <div
+        role={status === 'error' ? 'alert' : 'status'}
+        aria-live={status === 'error' ? 'assertive' : 'polite'}
         className={`rounded-2xl border p-6 transition-all duration-500
           ${status === 'error'
             ? 'bg-red-500/5 border-red-500/20'
@@ -67,7 +69,7 @@ export default function ConversionProgress({ status, progress, error }: Props) {
                 {status === 'converting'
                   ? `${progress.current} / ${progress.total}  ·  ${progress.fileName}`
                   : status === 'done'
-                  ? `${progress.total} file${progress.total > 1 ? 's' : ''} converted successfully`
+                  ? `${progress.total} output${progress.total > 1 ? 's' : ''} converted successfully`
                   : ''}
               </p>
             </div>

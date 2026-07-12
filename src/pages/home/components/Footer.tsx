@@ -1,74 +1,82 @@
-const FEATURES = [
-  { icon: 'ri-image-line', label: 'JPG',  color: 'text-orange-400/60' },
-  { icon: 'ri-image-line', label: 'PNG',  color: 'text-orange-400/60' },
-  { icon: 'ri-image-line', label: 'WEBP', color: 'text-orange-400/60' },
-  { icon: 'ri-image-line', label: 'GIF',  color: 'text-orange-400/60' },
-  { icon: 'ri-image-line', label: 'BMP',  color: 'text-orange-400/60' },
-  { icon: 'ri-music-line', label: 'WAV',  color: 'text-emerald-400/60' },
-  { icon: 'ri-music-line', label: 'MP3',  color: 'text-emerald-400/60' },
-  { icon: 'ri-music-line', label: 'AAC',  color: 'text-emerald-400/60' },
-  { icon: 'ri-music-line', label: 'FLAC', color: 'text-emerald-400/60' },
-  { icon: 'ri-music-line', label: 'OGG',  color: 'text-emerald-400/60' },
-  { icon: 'ri-video-line', label: 'MP4',  color: 'text-violet-400/60' },
-  { icon: 'ri-video-line', label: 'WEBM', color: 'text-violet-400/60' },
-];
+import { useMemo } from 'react';
+import {
+  detectEncodingCapabilities,
+  evaluateFormatAvailability,
+  OUTPUT_FORMATS,
+} from '@/config/formats';
+
+const CATEGORY_STYLE = {
+  image: { icon: 'ri-image-line', color: 'text-orange-400/60' },
+  audio: { icon: 'ri-music-line', color: 'text-emerald-400/60' },
+  video: { icon: 'ri-video-line', color: 'text-violet-400/60' },
+} as const;
 
 const HIGHLIGHTS = [
-  { icon: 'ri-flashlight-line',     text: 'No file size limits' },
-  { icon: 'ri-lock-line',           text: '100% private – runs in your browser' },
-  { icon: 'ri-wifi-off-line',       text: 'No upload to server' },
-  { icon: 'ri-infinity-line',       text: 'Unlimited conversions' },
+  { icon: 'ri-computer-line', text: 'Processed on your device' },
+  { icon: 'ri-lock-line', text: 'Files stay in your browser' },
+  { icon: 'ri-wifi-off-line', text: 'No file uploads' },
+  { icon: 'ri-checkbox-circle-line', text: 'Output format verified' },
 ];
 
 export default function Footer() {
+  const availableFormats = useMemo(() => {
+    const capabilities = detectEncodingCapabilities();
+    return OUTPUT_FORMATS.filter(
+      (format) => evaluateFormatAvailability(format, capabilities).available,
+    );
+  }, []);
+  const logoUrl = `${__BASE_PATH__}image.png`;
+
   return (
     <footer className="w-full bg-[#0a0a0a] border-t border-white/5 mt-8">
-      {/* Supported formats strip */}
       <div className="border-b border-white/5 py-5">
         <div className="max-w-4xl mx-auto px-6">
-          <p className="text-white/20 text-xs uppercase tracking-widest text-center mb-4">Supported Formats</p>
+          <p className="text-white/20 text-xs uppercase tracking-widest text-center mb-4">
+            Outputs available in this browser
+          </p>
           <div className="flex flex-wrap justify-center gap-2">
-            {FEATURES.map((f) => (
-              <span
-                key={f.label}
-                className="flex items-center gap-1.5 bg-white/[0.03] border border-white/5 rounded-full px-3 py-1 text-xs text-white/40"
-              >
-                <span className="w-3 h-3 flex items-center justify-center">
-                  <i className={`${f.icon} ${f.color}`} style={{ fontSize: '10px' }}></i>
+            {availableFormats.map((format) => {
+              const style = CATEGORY_STYLE[format.category];
+              return (
+                <span
+                  key={format.id}
+                  className="flex items-center gap-1.5 bg-white/[0.03] border border-white/5 rounded-full px-3 py-1 text-xs text-white/40"
+                >
+                  <i className={`${style.icon} ${style.color} text-[10px]`} aria-hidden="true"></i>
+                  {format.name}
                 </span>
-                {f.label}
-              </span>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
 
-      {/* Highlights */}
       <div className="py-8">
         <div className="max-w-4xl mx-auto px-6">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
-            {HIGHLIGHTS.map((h) => (
-              <div key={h.text} className="flex flex-col items-center gap-2 text-center">
+            {HIGHLIGHTS.map((highlight) => (
+              <div key={highlight.text} className="flex flex-col items-center gap-2 text-center">
                 <div className="w-9 h-9 flex items-center justify-center rounded-xl bg-orange-400/10 text-orange-400 text-base">
-                  <i className={h.icon}></i>
+                  <i className={highlight.icon} aria-hidden="true"></i>
                 </div>
-                <p className="text-white/30 text-xs leading-tight">{h.text}</p>
+                <p className="text-white/30 text-xs leading-tight">{highlight.text}</p>
               </div>
             ))}
           </div>
 
-          {/* Bottom */}
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-5 border-t border-white/5">
             <div className="flex items-center gap-2">
               <img
-                src="https://public.readdy.ai/ai/img_res/035b783a-6a55-460d-9aee-dcbba6ffe561.png"
-                alt="ZingFiles"
+                src={logoUrl}
+                alt=""
                 className="w-6 h-6 object-contain rounded"
               />
-              <span className="text-white/30 text-xs font-['Space_Grotesk',sans-serif] font-semibold">ZingFiles</span>
+              <span className="text-white/30 text-xs font-['Space_Grotesk',sans-serif] font-semibold">
+                ZingFiles Community
+              </span>
             </div>
             <p className="text-white/20 text-xs">
-              © {new Date().getFullYear()} ZingFiles · All conversions happen locally in your browser.
+              © {new Date().getFullYear()} ZingFiles · Files are never uploaded.
             </p>
           </div>
         </div>

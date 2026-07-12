@@ -88,6 +88,7 @@ function SortableFileRow({ file, index, total, onRemove, disabled, isDraggingOve
         {...attributes}
         {...listeners}
         disabled={disabled}
+        aria-label={`Reorder ${file.name}`}
         className={`
           w-6 h-6 flex items-center justify-center flex-shrink-0 rounded
           text-white/20 hover:text-white/50 transition-colors
@@ -120,6 +121,8 @@ function SortableFileRow({ file, index, total, onRemove, disabled, isDraggingOve
       {!disabled && (
         <button
           onClick={onRemove}
+          type="button"
+          aria-label={`Remove ${file.name}`}
           className="w-6 h-6 flex items-center justify-center text-white/40 hover:text-red-400 sm:opacity-0 sm:group-hover:opacity-100 transition-all cursor-pointer flex-shrink-0"
         >
           <i className="ri-close-line text-base"></i>
@@ -173,9 +176,18 @@ export default function UploadArea({ files, onAdd, onRemove, onReorder, onClear,
       {/* Drop zone */}
       <div
         onClick={() => !disabled && inputRef.current?.click()}
+        onKeyDown={(event) => {
+          if (!disabled && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault();
+            inputRef.current?.click();
+          }
+        }}
         onDrop={handleDropZoneDrop}
         onDragOver={(e) => { e.preventDefault(); if (!disabled) setDropZoneDragging(true); }}
         onDragLeave={() => setDropZoneDragging(false)}
+        role="button"
+        tabIndex={disabled ? -1 : 0}
+        aria-label="Choose image, audio, or video files"
         className={`
           relative w-full rounded-2xl border-2 border-dashed transition-all duration-300 cursor-pointer
           flex flex-col items-center justify-center gap-3 md:gap-4 p-6 md:p-10 text-center select-none
@@ -209,17 +221,20 @@ export default function UploadArea({ files, onAdd, onRemove, onReorder, onClear,
           <div className="flex flex-wrap justify-center gap-x-3 gap-y-1 mt-2">
             <span className="text-white/25 text-xs">
               <i className="ri-image-line text-orange-400/60 mr-1"></i>
-              Images · JPG PNG WEBP GIF BMP
+              Browser-decodable images
             </span>
             <span className="text-white/25 text-xs">
               <i className="ri-music-line text-emerald-400/60 mr-1"></i>
-              Audio · MP3 WAV AAC FLAC
+              Browser-decodable audio
             </span>
             <span className="text-white/25 text-xs">
               <i className="ri-video-line text-violet-400/60 mr-1"></i>
-              Video · MP4 WEBM MOV AVI
+              Browser-decodable video
             </span>
           </div>
+          <p className="text-white/20 text-[11px] mt-2">
+            Input codec support varies by browser. Unsupported files show a clear conversion error.
+          </p>
         </div>
 
         <span className="absolute top-3 left-3 w-3 h-3 border-t-2 border-l-2 border-orange-400/40 rounded-tl-sm"></span>
@@ -245,6 +260,7 @@ export default function UploadArea({ files, onAdd, onRemove, onReorder, onClear,
             </div>
             <button
               onClick={onClear}
+              type="button"
               disabled={disabled}
               className="text-xs text-white/30 hover:text-red-400 transition-colors cursor-pointer whitespace-nowrap"
             >
