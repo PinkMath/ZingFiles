@@ -1,8 +1,17 @@
+<div align="center">
+  
+<img width="100" alt="image" src="https://github.com/user-attachments/assets/a555de3d-f1c7-4424-bd94-7d1ce4764e8f" />
+
 # ZingFiles
+
+</div>
 
 ZingFiles is a privacy-first media converter that runs in the browser. It converts only formats that the current browser can genuinely encode, validates each output, and never treats changing a filename extension as a successful conversion.
 
 [Open ZingFiles](https://loavy.github.io/ZingFiles/)
+
+<img width="1716" height="950" alt="image" src="https://github.com/user-attachments/assets/8a51b361-01d1-4f0b-82fa-96c9d27567a7" />
+
 
 ## What ZingFiles does
 
